@@ -58,8 +58,8 @@ cd jntuh-fasttrack_v2
 3. Create a `.env` file in the `backend/` folder:
    ```env
    PORT=3001
-   ENCRYPTION_KEY=your_secret_32_character_key
-   JNTUH_HOME_URL=http://results.jntuh.ac.in/jsp/home.jsp
+   ENCRYPTION_KEY=
+   JNTUH_HOME_URL=
    JNTUH_RESULT_ACTION_URL=
    ```
 4. Start the backend server:
