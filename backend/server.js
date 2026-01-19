@@ -12,6 +12,58 @@ const { JSDOM } = require('jsdom');
 const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 const crypto = require('crypto');
 
+// --- ROBUST FETCH HELPER ---
+/**
+ * Fetches data from a URL with retries and a realistic User-Agent.
+ * Solves ERR_STREAM_PREMATURE_CLOSE and timeout issues.
+ */
+const fetchWithRetry = async (url, options = {}, retries = 3, backoff = 1500) => {
+    const defaultHeaders = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Connection': 'keep-alive'
+    };
+
+    const combinedHeaders = { ...defaultHeaders, ...(options.headers || {}) };
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 25000); // 25s global timeout
+
+    try {
+        for (let i = 0; i < retries; i++) {
+            try {
+                const response = await fetch(url, {
+                    ...options,
+                    headers: combinedHeaders,
+                    signal: controller.signal
+                });
+
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+                // Read text explicitly to catch premature close
+                const text = await response.text();
+                if (!text || text.length < 100) {
+                    // JNTUH sometimes sends empty or skeleton responses on error
+                    if (text.toLowerCase().includes('server error') || text.toLowerCase().includes('service unavailable')) {
+                        throw new Error('JNTUH returned error page');
+                    }
+                }
+                return text;
+            } catch (err) {
+                const isLastAttempt = i === retries - 1;
+                if (isLastAttempt) throw err;
+
+                // Backoff with jitter
+                const waitTime = backoff * (i + 1) + Math.random() * 500;
+                console.log(`[Retry] Attempt ${i + 1} failed for ${url.substring(0, 60)}... Retrying in ${Math.round(waitTime)}ms`);
+                await new Promise(resolve => setTimeout(resolve, waitTime));
+            }
+        }
+    } finally {
+        clearTimeout(timeoutId);
+    }
+};
+
 // --- ENCRYPTION CONFIGURATION ---
 const ENCRYPTION_KEY = crypto.createHash('sha256').update(String(process.env.ENCRYPTION_KEY || 'default_secret_key_1234567890')).digest();
 const ALGORITHM = 'aes-256-cbc';
@@ -236,6 +288,13 @@ let examCache = {
     data: null,
     lastFetched: 0
 };
+
+// --- JNTUH RC/RV CACHE ---
+let rcrvCache = {
+    data: null,
+    lastFetched: 0
+};
+
 const CACHE_DURATION = 30 * 60 * 1000; // 30 minutes
 
 const fetchAndCacheExams = async () => {
@@ -248,10 +307,8 @@ const fetchAndCacheExams = async () => {
     console.log('[Server] Refreshing Exam Cache from JNTUH...');
     try {
         const homeUrl = process.env.JNTUH_HOME_URL || 'http://results.jntuh.ac.in/jsp/home.jsp';
-        const response = await fetch(homeUrl);
-        if (!response.ok) throw new Error('Failed to reach JNTUH home page');
+        const html = await fetchWithRetry(homeUrl);
 
-        const html = await response.text();
         const dom = new JSDOM(html);
         const doc = dom.window.document;
 
@@ -289,14 +346,84 @@ const fetchAndCacheExams = async () => {
         console.log(`[Server] Exam Cache Updated: ${uniqueExams.length} exams found.`);
         return uniqueExams;
     } catch (err) {
-        console.error('[Server] Cache Scraper Error:', err);
+        console.error('[Server] Exam Cache Scraper Error:', err);
         return examCache.data || []; // Fallback to stale data if any
+    }
+};
+
+const fetchAndCacheRCRV = async () => {
+    const now = Date.now();
+    if (rcrvCache.data && (now - rcrvCache.lastFetched < CACHE_DURATION)) {
+        return rcrvCache.data;
+    }
+
+    console.log('[Server] Refreshing RC/RV Cache from JNTUH...');
+    try {
+        const rcrvUrl = 'http://results.jntuh.ac.in/jsp/RCRVInfo.jsp';
+        const html = await fetchWithRetry(rcrvUrl);
+
+        const dom = new JSDOM(html);
+        const doc = dom.window.document;
+
+        // The subagent found notifications are in <h3><p> tags
+        const notifications = [];
+        const h3s = doc.querySelectorAll('h3');
+
+        h3s.forEach(h3 => {
+            const p = h3.querySelector('p');
+            if (p) {
+                let text = p.textContent.trim();
+                const isNew = p.querySelector('img[src*="new"]') !== null;
+
+                // Example text: (18-12-2025) BPHARMACY II-II SEMESTER REGULAR/SUPPLEMENTARY...
+                const dateMatch = text.match(/^\s*\(([^)]+)\)/);
+                const date = dateMatch ? dateMatch[1] : null;
+
+                // Extract clean title (everything after the date)
+                let title = text.replace(/^\s*\([^)]+\)\s*/, '').trim();
+
+                // Extract deadline if present
+                let deadline = null;
+                const deadlineKeywords = ["LAST DATE FOR CHALLENGE VALUATION", "LAST DATE TO APPLY FOR RC/RV"];
+                for (const kw of deadlineKeywords) {
+                    const idx = title.toUpperCase().indexOf(kw);
+                    if (idx !== -1) {
+                        deadline = title.substring(idx).trim();
+                        title = title.substring(0, idx).trim();
+                        // Remove trailing colons or dashes from title if any
+                        title = title.replace(/[:-\s]+$/, '');
+                        break;
+                    }
+                }
+
+                if (title) {
+                    notifications.push({
+                        date,
+                        title,
+                        deadline,
+                        isNew
+                    });
+                }
+            }
+        });
+
+        rcrvCache = {
+            data: notifications,
+            lastFetched: now
+        };
+        console.log(`[Server] RC/RV Cache Updated: ${notifications.length} notifications found.`);
+        return notifications;
+    } catch (err) {
+        console.error('[Server] RC/RV Cache Scraper Error:', err);
+        return rcrvCache.data || [];
     }
 };
 
 // Initial Fetch and Setup Auto-Refresh
 fetchAndCacheExams();
+fetchAndCacheRCRV();
 setInterval(fetchAndCacheExams, CACHE_DURATION);
+setInterval(fetchAndCacheRCRV, CACHE_DURATION);
 
 // --- KPI CARDS & KPI DATA ---
 const saveData = () => {
@@ -444,6 +571,11 @@ app.get('/api/exam-codes', async (req, res) => {
     res.json({ success: true, exams: exams });
 });
 
+app.get('/api/rcrv-notifications', async (req, res) => {
+    const notifications = await fetchAndCacheRCRV();
+    res.json({ success: true, data: notifications });
+});
+
 // --- GET SAVED RESULT ENDPOINT ---
 // --- GET SAVED RESULT ENDPOINT (FILE SYSTEM) ---
 app.get('/api/saved-result', (req, res) => {
@@ -508,50 +640,20 @@ app.post('/api/fetch-official', async (req, res) => {
     } catch (e) { console.error("Cache Check Error:", e); }
 
     try {
-        // Construct URL
         const baseActionUrl = process.env.JNTUH_RESULT_ACTION_URL || 'http://results.jntuh.ac.in/resultAction';
         let targetUrl = `${baseActionUrl}?${code}&htno=${htno}`;
         console.log(`[Official Fetch] ${targetUrl}`);
 
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
-
-        let response;
+        let html;
         try {
-            response = await fetch(targetUrl, { signal: controller.signal });
+            html = await fetchWithRetry(targetUrl, {}, 2, 2000);
         } catch (fetchErr) {
-            if (fetchErr.name === 'AbortError') {
-                throw new Error('JNTUH Server Timeout (15s). Please try again later.');
-            }
-            throw fetchErr;
-        } finally {
-            clearTimeout(timeoutId);
+            console.log("[Official Fetch] Primary attempt failed, trying fallback parameters...");
+            // FALLBACK LOGIC: Try with null params if first fails
+            const retryUrl = `${baseActionUrl}?${code}&result=null&grad=null&htno=${htno}`;
+            html = await fetchWithRetry(retryUrl, {}, 2, 2000);
         }
 
-        // FAILOVER LOGIC: If 500 or error, try fallback parameters
-        if (response.status === 500) {
-            console.log("Received 500 from JNTUH. Retrying with fallback parameters...");
-            const retryController = new AbortController();
-            const retryTimeoutId = setTimeout(() => retryController.abort(), 15000);
-
-            try {
-                const baseActionUrl = process.env.JNTUH_RESULT_ACTION_URL || 'http://results.jntuh.ac.in/resultAction';
-                targetUrl = `${baseActionUrl}?${code}&result=null&grad=null&htno=${htno}`;
-                console.log(`[Official Fetch Retry] ${targetUrl}`);
-                response = await fetch(targetUrl, { signal: retryController.signal });
-            } catch (retryErr) {
-                if (retryErr.name === 'AbortError') throw new Error('JNTUH Server Timeout on retry.');
-                throw retryErr;
-            } finally {
-                clearTimeout(retryTimeoutId);
-            }
-        }
-
-        if (!response.ok) {
-            throw new Error(`JNTUH Server Error: ${response.status}`);
-        }
-
-        const html = await response.text();
         const dom = new JSDOM(html);
         const doc = dom.window.document;
 
