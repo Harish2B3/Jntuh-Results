@@ -110,17 +110,15 @@ const saveUnifiedResult = (hallTicket, resultType, data) => {
         allResults[studentKey] = {};
     }
 
-    // Store/Update the specific result type (reduces redundancy for same exam)
+    // Direct save for the specified type
     allResults[studentKey][typeKey] = {
         data,
         savedAt: new Date().toISOString()
     };
 
-    // --- AUTOMATICALLY UPDATE OVERALL_RESULTS ---
-    // If we are saving a specific exam result, we should also update the student's overall record.
+    // --- AUTOMATICALLY UPDATE OVERALL_RESULTS FROM INDIVIDUAL EXAMS ---
     if (typeKey !== 'OVERALL_RESULTS' && data && data.subjects) {
         try {
-            // Helper to extract a sortable/comparable semester string (e.g., "1-1")
             const getRawSem = (sem) => {
                 if (!sem) return 'Unknown';
                 const match = sem.match(/(\d-\d)/);
@@ -129,7 +127,7 @@ const saveUnifiedResult = (hallTicket, resultType, data) => {
 
             const targetSemRaw = getRawSem(data.semester);
 
-            // Initialize OVERALL_RESULTS if it doesn't exist
+            // Init OVERALL_RESULTS if missing
             if (!allResults[studentKey]['OVERALL_RESULTS']) {
                 allResults[studentKey]['OVERALL_RESULTS'] = {
                     data: {
@@ -145,13 +143,11 @@ const saveUnifiedResult = (hallTicket, resultType, data) => {
             }
 
             const overall = allResults[studentKey]['OVERALL_RESULTS'].data;
-
-            // Find existing semester entry or create new one
             let semEntry = overall.semesters.find(s => getRawSem(s.semester) === targetSemRaw);
 
             if (!semEntry) {
                 semEntry = {
-                    semester: targetSemRaw, // Use raw for consistency
+                    semester: targetSemRaw,
                     sgpa: 0,
                     totalCredits: 0,
                     results: []
@@ -159,54 +155,45 @@ const saveUnifiedResult = (hallTicket, resultType, data) => {
                 overall.semesters.push(semEntry);
             }
 
-            // Sync student name (in case it was missing)
             if (data.name && data.name !== "Student") overall.name = data.name;
 
-            // Merge subjects: Latest result for a subject code wins
+            // Merge subjects for this specific exam
             data.subjects.forEach(newSub => {
                 const existingIdx = semEntry.results.findIndex(s => s.code === newSub.code);
-                if (existingIdx > -1) {
-                    semEntry.results[existingIdx] = { ...newSub };
-                } else {
-                    semEntry.results.push({ ...newSub });
-                }
+                if (existingIdx > -1) semEntry.results[existingIdx] = { ...newSub };
+                else semEntry.results.push({ ...newSub });
             });
 
-            // Recalculate SGPA for the modified semester
+            // Recalculate SGPA/CGPA
             const gradePoints = { 'O': 10, 'A+': 9, 'A': 8, 'B+': 7, 'B': 6, 'C': 5, 'F': 0, 'Ab': 0 };
-            let sPoints = 0;
-            let sCredits = 0;
-            semEntry.results.forEach(s => {
-                const pts = gradePoints[s.grade] || 0;
-                sPoints += pts * (s.credits || 0);
-                sCredits += (s.credits || 0);
-            });
-            semEntry.sgpa = sCredits > 0 ? parseFloat((sPoints / sCredits).toFixed(2)) : 0;
-            semEntry.totalCredits = sCredits;
 
-            // Recalculate CGPA across all semesters
-            let totalPoints = 0;
-            let totalCredits = 0;
-            overall.semesters.forEach(sem => {
-                let semSubPoints = 0;
+            const calcSem = (sem) => {
+                let pts = 0, crd = 0;
                 sem.results.forEach(s => {
-                    const pts = gradePoints[s.grade] || 0;
-                    semSubPoints += pts * (s.credits || 0);
+                    pts += (gradePoints[s.grade] || 0) * (s.credits || 0);
+                    crd += (s.credits || 0);
                 });
-                totalPoints += semSubPoints;
-                totalCredits += sem.totalCredits;
-            });
-            overall.cgpa = totalCredits > 0 ? parseFloat((totalPoints / totalCredits).toFixed(2)) : 0;
-            overall.totalCredits = totalCredits;
+                sem.sgpa = crd > 0 ? parseFloat((pts / crd).toFixed(2)) : 0;
+                sem.totalCredits = crd;
+            };
 
-            // Re-sort semesters for a clean display (1-1, 1-2, 2-1...)
+            calcSem(semEntry);
+
+            let tPts = 0, tCrd = 0;
+            overall.semesters.forEach(s => {
+                calcSem(s); // Ensure all are updated
+                s.results.forEach(sub => {
+                    tPts += (gradePoints[sub.grade] || 0) * (sub.credits || 0);
+                    tCrd += (sub.credits || 0);
+                });
+            });
+            overall.cgpa = tCrd > 0 ? parseFloat((tPts / tCrd).toFixed(2)) : 0;
+            overall.totalCredits = tCrd;
             overall.semesters.sort((a, b) => a.semester.localeCompare(b.semester));
 
-            // Update the overall saved timestamp
             allResults[studentKey]['OVERALL_RESULTS'].savedAt = new Date().toISOString();
-
-        } catch (updateErr) {
-            console.error('[Sync] Error updating OVERALL_RESULTS:', updateErr);
+        } catch (err) {
+            console.error('[Sync] Error updating OVERALL_RESULTS:', err);
         }
     }
 
@@ -214,7 +201,6 @@ const saveUnifiedResult = (hallTicket, resultType, data) => {
         const jsonData = JSON.stringify(allResults);
         const encryptedData = encrypt(jsonData);
         fs.writeFileSync(UNIFIED_RESULTS_FILE, encryptedData);
-        console.log(`[File System] Saved unified result [${typeKey}] for ${studentKey} (Encrypted)`);
         return true;
     } catch (e) {
         console.error('Error writing unified results file:', e);
