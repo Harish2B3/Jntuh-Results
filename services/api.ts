@@ -109,7 +109,63 @@ const saveResultToBackend = async (data: any, type: string, identifier?: string)
 };
 
 export const fetchStudentResult = async (htNo: string): Promise<{ success: boolean; data?: OverallStudentResult; error?: string; source?: string }> => {
-    // 1. Check for Cached Result in Backend filesystem
+    // 1. Fetch from Dhethi for latest external history
+    const dhethiData = await fetchFromDhethi(htNo);
+
+    if (dhethiData && dhethiData.results && dhethiData.results.length > 0) {
+        // Map Dhethi data to our OverallStudentResult format
+        const sortedSemesters = [...dhethiData.results].sort((a, b) => a.semester.localeCompare(b.semester));
+        const semesterHistories: SemesterHistory[] = [];
+        let cumulativePoints = 0;
+        let cumulativeCredits = 0;
+
+        for (const semData of sortedSemesters) {
+            const exams = semData.exams || [];
+            if (exams.length === 0) continue;
+
+            const mergedSubjects: Record<string, SubjectResult> = {};
+            exams.forEach((exam: any) => {
+                const examSubjects = exam.subjects.map(mapSubject);
+                examSubjects.forEach(sub => { mergedSubjects[sub.code] = sub; });
+            });
+
+            const subjects = Object.values(mergedSubjects);
+            let totalPoints = 0;
+            let totalCredits = 0;
+
+            subjects.forEach(sub => {
+                const pts = gradeToPoints(sub.grade);
+                totalPoints += pts * sub.credits;
+                totalCredits += sub.credits;
+            });
+
+            semesterHistories.push({
+                semester: semData.semester,
+                sgpa: totalCredits > 0 ? parseFloat((totalPoints / totalCredits).toFixed(2)) : 0,
+                totalCredits,
+                results: subjects
+            });
+
+            cumulativePoints += totalPoints;
+            cumulativeCredits += totalCredits;
+        }
+
+        const overallResult: OverallStudentResult = {
+            hallTicket: dhethiData.details.rollNumber,
+            name: dhethiData.details.name,
+            course: dhethiData.details.branch || 'B.TECH',
+            cgpa: cumulativeCredits > 0 ? parseFloat((cumulativePoints / cumulativeCredits).toFixed(2)) : 0,
+            totalCredits: cumulativeCredits,
+            semesters: semesterHistories
+        };
+
+        // Save to backend in background to keep local records updated/merged
+        saveResultToBackend(overallResult, 'OVERALL_RESULTS');
+
+        return { success: true, data: overallResult, source: 'NETWORK' };
+    }
+
+    // 2. Fallback to backend cache if Dhethi fails or is empty
     try {
         const cacheRes = await fetch(`${LOCAL_API_BASE}/saved-result?type=OVERALL_RESULTS&id=${htNo}`);
         if (cacheRes.ok) {
@@ -118,80 +174,11 @@ export const fetchStudentResult = async (htNo: string): Promise<{ success: boole
                 return { success: true, data: cachedData.data, source: 'SERVER_FILE_CACHE' };
             }
         }
-    } catch (e) { /* Ignore cache check error, proceed to fetch */ }
-
-    const data = await fetchFromDhethi(htNo);
-
-    if (!data || !data.results || data.results.length === 0) {
-        return { success: false, error: 'No results found for this Hall Ticket.' };
+    } catch (e) {
+        console.error("Cache Fallback Error:", e);
     }
 
-    // Sort semesters to be in order
-    const sortedSemesters = [...data.results].sort((a, b) => {
-        // Heuristic sort for "1-1", "1-2" strings
-        return a.semester.localeCompare(b.semester);
-    });
-
-    const semesterHistories: SemesterHistory[] = [];
-    let cumulativePoints = 0;
-    let cumulativeCredits = 0;
-
-    for (const semData of sortedSemesters) {
-        // MERGE LOGIC: Iterate ALL exams to build a complete subject map
-        const exams = semData.exams || [];
-        if (exams.length === 0) continue;
-
-        const mergedSubjects: Record<string, SubjectResult> = {};
-
-        // Process exams to merge subjects (latest attempt overrides)
-        exams.forEach((exam: any) => {
-            const examSubjects = exam.subjects.map(mapSubject);
-            examSubjects.forEach(sub => {
-                mergedSubjects[sub.code] = sub;
-            });
-        });
-
-        const subjects = Object.values(mergedSubjects);
-
-        let totalPoints = 0;
-        let totalCredits = 0;
-
-        subjects.forEach(sub => {
-            const pts = gradeToPoints(sub.grade);
-            totalPoints += pts * sub.credits;
-            // Always count credits for SGPA unless subject is withdrawn/absent? 
-            // Standard JNTUH: Total Points / Total Credits Registered.
-            totalCredits += sub.credits;
-        });
-
-        const sgpa = totalCredits > 0 ? parseFloat((totalPoints / totalCredits).toFixed(2)) : 0;
-
-        semesterHistories.push({
-            semester: semData.semester,
-            sgpa,
-            totalCredits,
-            results: subjects
-        });
-
-        cumulativePoints += totalPoints;
-        cumulativeCredits += totalCredits;
-    }
-
-    const cgpa = cumulativeCredits > 0 ? parseFloat((cumulativePoints / cumulativeCredits).toFixed(2)) : 0;
-
-    const overallResult: OverallStudentResult = {
-        hallTicket: data.details.rollNumber,
-        name: data.details.name,
-        course: data.details.branch || 'B.TECH',
-        cgpa: cgpa,
-        totalCredits: cumulativeCredits,
-        semesters: semesterHistories
-    };
-
-    // Auto-save this result to backend
-    saveResultToBackend(overallResult, 'OVERALL_RESULTS');
-
-    return { success: true, data: overallResult, source: 'NETWORK' };
+    return { success: false, error: 'No results found for this Hall Ticket.' };
 };
 
 
