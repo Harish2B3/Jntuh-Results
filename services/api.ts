@@ -66,6 +66,16 @@ export const fetchExamCodes = async (): Promise<{ success: boolean; exams?: { ti
     }
 };
 
+export const fetchRCRVNotifications = async (): Promise<{ success: boolean; data?: { date: string | null, title: string, deadline: string | null, isNew: boolean }[]; error?: string }> => {
+    try {
+        const response = await fetch(`${LOCAL_API_BASE}/rcrv-notifications`);
+        const data = await response.json();
+        return data;
+    } catch (e) {
+        return { success: false, error: 'Failed to load RC/RV notifications' };
+    }
+};
+
 export const fetchExamUrls = async (): Promise<{ success: boolean; data?: { title: string, url: string, code: string, date?: string }[]; error?: string }> => {
     try {
         const response = await fetch(`${LOCAL_API_BASE}/exam-urls`);
