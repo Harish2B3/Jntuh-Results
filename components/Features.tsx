@@ -21,18 +21,6 @@ const features = [
     bg: "bg-blue-100",
     title: "Official Data Source",
     description: "Directly synced with university servers to ensure 100% accuracy and reliability of data."
-  },
-  {
-    icon: <Clock className="w-6 h-6 text-rose-500" />,
-    bg: "bg-rose-100",
-    title: "Real-time Notifications",
-    description: "Never miss an update. Subscribe to get SMS/Email alerts for results, timetables, and fee dues."
-  },
-  {
-    icon: <Smartphone className="w-6 h-6 text-purple-500" />,
-    bg: "bg-purple-100",
-    title: "Mobile First Design",
-    description: "Optimized for every screen. Check your results on the go with our responsive interface."
   }
 ];
 
