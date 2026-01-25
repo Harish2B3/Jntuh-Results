@@ -6,6 +6,7 @@ import { Footer } from './components/Footer';
 import { Home } from './pages/Home';
 import { CheckResults } from './pages/CheckResults';
 import { Notifications } from './pages/Notifications';
+import { PrivacyPolicy } from './pages/PrivacyPolicy';
 
 import { SecurityWrapper } from './components/SecurityWrapper';
 
@@ -25,6 +26,7 @@ const AppContent: React.FC = () => {
             <Route path="/results" element={<CheckResults />} />
             <Route path="/results/:htNo" element={<CheckResults />} />
             <Route path="/notifications" element={<Notifications />} />
+            <Route path="/privacy-policy" element={<PrivacyPolicy />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </main>
